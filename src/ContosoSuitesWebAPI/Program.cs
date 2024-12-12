@@ -9,6 +9,11 @@ using Azure.AI.OpenAI;
 using Azure;
 using Microsoft.AspNetCore.Mvc;
 
+using Microsoft.SemanticKernel;
+using Microsoft.SemanticKernel.Connectors.OpenAI;
+using Microsoft.SemanticKernel.ChatCompletion;
+
+
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
@@ -40,7 +45,27 @@ builder.Services.AddSingleton<AzureOpenAIClient>((_) =>
     return client;
 });
 
-var app = builder.Build();
+builder.Services.AddSingleton<Kernel>((_) =>
+{
+    IKernelBuilder kernelBuilder = Kernel.CreateBuilder();
+    kernelBuilder.AddAzureOpenAIChatCompletion(
+        deploymentName: builder.Configuration["AzureOpenAI:DeploymentName"]!,
+        endpoint: builder.Configuration["AzureOpenAI:Endpoint"]!,
+        apiKey: builder.Configuration["AzureOpenAI:ApiKey"]!
+    );
+    kernelBuilder.Plugins.AddFromType<DatabaseService>();
+    return kernelBuilder.Build();
+});
+
+
+var app = builder
+    .Build();
+
+var config = new ConfigurationBuilder()
+    .AddUserSecrets<Program>()
+    .AddEnvironmentVariables()
+    .Build();
+
 
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
@@ -87,16 +112,6 @@ app.MapGet("/Hotels/{hotelId}/Bookings/{min_date}", async (int hotelId, DateTime
     .WithName("GetRecentBookingsForHotel")
     .WithOpenApi();
 
-// This endpoint is used to send a message to the Azure OpenAI endpoint.
-app.MapPost("/Chat", async Task<string> (HttpRequest request) =>
-{
-    var message = await Task.FromResult(request.Form["message"]);
-    
-    return "This endpoint is not yet available.";
-})
-    .WithName("Chat")
-    .WithOpenApi();
-
 // This endpoint is used to vectorize a text string.
 // We will use this to generate embeddings for the maintenance request text.
 app.MapGet("/Vectorize", async (string text, [FromServices] IVectorizationService vectorizationService) =>
@@ -124,5 +139,21 @@ app.MapPost("/MaintenanceCopilotChat", async ([FromBody]string message, [FromSer
 })
     .WithName("Copilot")
     .WithOpenApi();
+
+app.MapPost("/Chat", async Task<string> (HttpRequest request) =>
+{
+    var message = await Task.FromResult(request.Form["message"]);
+    var kernel = app.Services.GetRequiredService<Kernel>();
+    var chatCompletionService = kernel.GetRequiredService<IChatCompletionService>();
+    var executionSettings = new OpenAIPromptExecutionSettings
+    {
+        ToolCallBehavior = ToolCallBehavior.AutoInvokeKernelFunctions
+    };
+    var response = await chatCompletionService.GetChatMessageContentAsync(message.ToString(), executionSettings, kernel);
+    return response?.Content!;
+})
+    .WithName("Chat")
+    .WithOpenApi();
+
 
 app.Run();
